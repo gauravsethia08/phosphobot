@@ -13,7 +13,8 @@ import tqdm
 from loguru import logger
 from torch.utils.data import Dataset
 import argparse
-
+import cv2
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 class ParquetEpisodesDataset(Dataset):
     """Custom Dataset for loading parquet files from a directory."""
@@ -29,20 +30,25 @@ class ParquetEpisodesDataset(Dataset):
         if not self.data_dir.exists():
             raise FileNotFoundError(f"Data directory not found: {self.data_dir}")
         if not self.videos_dir.exists():
-            raise FileNotFoundError(f"Videos directory not found: {self.videos_dir}")
+            logger.warning(f"Videos directory not found: {self.videos_dir}")
+            self.videos = None
+            # raise FileNotFoundError(f"Videos directory not found: {self.videos_dir}")
 
         self.file_paths = sorted(self.data_dir.rglob("*.parquet"))
-        self.video_paths = sorted(self.videos_dir.rglob("*.mp4"))
+        if self.videos_dir is not None:
+            self.video_paths = sorted(self.videos_dir.rglob("*.mp4"))
 
         self.parquet_cache: dict[str, pd.DataFrame] = {}
 
         if not self.file_paths:
             raise ValueError(f"No parquet files found in {dataset_dir}")
 
-        if not self.video_paths:
-            raise ValueError(f"No video files found in {dataset_dir}")
+        logger.info(f"Videos Exists: {self.videos}")
+        if self.videos is not None:
+            if not self.video_paths:
+                raise ValueError(f"No video files found in {dataset_dir}")
 
-        if len(self.video_paths) % len(self.file_paths) != 0:
+        if self.videos_dir is not None and len(self.video_paths) % len(self.file_paths) != 0:
             raise ValueError(
                 f"Number of parquet files ({len(self.file_paths)}) does not match "
                 f"number of video files ({len(self.video_paths)})"
@@ -66,35 +72,43 @@ class ParquetEpisodesDataset(Dataset):
             self.steps_per_episode[episode_idx] = nb_steps
 
             # Find all the related video files and store them in the index_mapping
-            related_video_files = [
-                video_path
-                for video_path in self.video_paths
-                if f"episode_{episode_idx:06d}" in video_path.name
-            ]
-            # TODO: Use REGEX to split the path instead of chunk-000
-            related_video_files_dict = {
-                video_path.parent.name: video_path for video_path in related_video_files
-            }
+            if self.videos_dir is not None:
+                related_video_files = [
+                    video_path
+                    for video_path in self.video_paths
+                    if f"episode_{episode_idx:06d}" in video_path.name
+                ]
+                # TODO: Use REGEX to split the path instead of chunk-000
+                related_video_files_dict = {
+                    video_path.parent.name: video_path for video_path in related_video_files
+                }
+            else:
+                related_video_files_dict = None
 
             for i in range(nb_steps):
                 self.index_mapping[i + global_idx] = {
                     "file_path": file_path,
                     "episode_idx": episode_idx,
                     "row_idx": i,
-                    "videos_paths": related_video_files_dict,
+                    # "videos_paths": related_video_files_dict,
                 }
+                if self.videos is not None:
+                    self.index_mapping[i + global_idx]["videos_paths"] = related_video_files_dict
             global_idx += nb_steps
 
         self.total_length = sum(self.episode_nb_steps)
 
         # video keys are the unique names of the folders in the videos directory
-        videos_folders = self.videos_dir / "chunk-000"
-        if not videos_folders.exists():
-            raise FileNotFoundError(
+        if self.videos_dir is not None and self.videos is not None:
+            videos_folders = self.videos_dir / "chunk-000"
+            if not videos_folders.exists():
+                raise FileNotFoundError(
                 f"Videos folders not found: {videos_folders}. "
                 "Please check the videos directory structure."
-            )
-        self.video_keys = os.listdir(videos_folders)
+                )
+            self.video_keys = os.listdir(videos_folders)
+        else:
+            self.video_keys = None
 
     def __len__(self):
         return self.total_length
@@ -117,13 +131,14 @@ class ParquetEpisodesDataset(Dataset):
         row_data = df.iloc[row_idx]
 
         # Get the related video files
-        videos_paths = self.index_mapping[idx]["videos_paths"]
-        video_key_to_path = {}
-        for key, video_path in videos_paths.items():
-            # Load the video and store it in the row_data
-            video_key_to_path[key] = decode_video_frames_torchvision(
-                video_path, timestamp=[row_data["timestamp"]]
-            ).squeeze(0)
+        if self.videos is not None:
+            videos_paths = self.index_mapping[idx]["videos_paths"]
+            video_key_to_path = {}
+            for key, video_path in videos_paths.items():
+                # Load the video and store it in the row_data
+                video_key_to_path[key] = decode_video_frames_torchvision(
+                    video_path, timestamp=[row_data["timestamp"]]
+                ).squeeze(0)
 
         # Convert each column to a Tensor
         # If it's a list/np.ndarray, turn it into a float32 tensor of that shape
@@ -140,8 +155,9 @@ class ParquetEpisodesDataset(Dataset):
             else:
                 sample[col_name] = torch.tensor([value], dtype=torch.float32)
 
-        for key in video_key_to_path.keys():
-            sample[key] = video_key_to_path[key]
+        if self.videos is not None:
+            for key in video_key_to_path.keys():
+                sample[key] = video_key_to_path[key]
 
         return sample
 
@@ -494,6 +510,74 @@ def decode_video_frames_torchvision(
     return closest_frames
 
 
+def process_parquet_file(file_path, episodes_stats_file):
+    df = pd.read_parquet(file_path, engine="pyarrow")
+    stats = {}
+
+    for feature in df.columns:
+        if "image" not in feature:
+            stats[feature] = {}
+            feature_array = np.array(df[feature].to_list())
+            stats[feature]["mean"] = feature_array.mean(axis=0).tolist()
+            stats[feature]["std"] = feature_array.std(axis=0).tolist()
+            stats[feature]["max"] = feature_array.max(axis=0).tolist()
+            stats[feature]["min"] = feature_array.min(axis=0).tolist()
+            stats[feature]["count"] = [feature_array.shape[0]]
+            if isinstance(stats[feature]["mean"], (int, float)):
+                stats[feature]["mean"] = [stats[feature]["mean"]]
+                stats[feature]["std"] = [stats[feature]["std"]]
+                stats[feature]["max"] = [stats[feature]["max"]]
+                stats[feature]["min"] = [stats[feature]["min"]]
+        else:
+            stats[feature] = {}
+            stats[feature]["count"] = [df[feature].shape[0]]
+            all_images = []
+            for image in df[feature].sample(50):
+                image_array = np.frombuffer(image["bytes"], dtype=np.uint8)
+                img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)/255.0
+                all_images.append(img)
+            all_images = np.array(all_images)
+            stats[feature]["mean"] = all_images.mean(axis=(0, 1, 2)).reshape(-1, 1, 1).tolist()
+            stats[feature]["std"] = all_images.std(axis=(0, 1, 2)).reshape(-1, 1, 1).tolist()
+            stats[feature]["max"] = all_images.max(axis=(0, 1, 2)).reshape(-1, 1, 1).tolist()
+            stats[feature]["min"] = all_images.min(axis=(0, 1, 2)).reshape(-1, 1, 1).tolist()
+
+    # Append to the stats file (thread-safe if using file locking)
+    with open(episodes_stats_file, "a") as f:
+        episode_stats = {"episode_index": int(df["episode_index"].iloc[0]), "stats": stats}
+        json.dump(episode_stats, f)
+        f.write("\n")
+
+    logger.success(f"Processed {file_path}")
+    return file_path
+
+def update_stats_parallel(dataset_path, max_workers=8):
+    episodes_stats_file = os.path.join(dataset_path, "meta", "episodes_stats.jsonl")
+    # delete the episodes_stats.jsonl file if it exists
+    if os.path.exists(episodes_stats_file):
+        os.remove(episodes_stats_file)
+    os.makedirs(os.path.dirname(episodes_stats_file), exist_ok=True)
+
+    parquet_files = []
+    for chunk in sorted(os.listdir(os.path.join(dataset_path, "data"))):
+        chunk_path = os.path.join(dataset_path, "data", chunk)
+        for file in os.listdir(chunk_path):
+            if file.endswith(".parquet"):
+                parquet_files.append(os.path.join(chunk_path, file))
+            else:
+                logger.warning(f"Skipping {file} because it is not a parquet file")
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(process_parquet_file, f, episodes_stats_file) for f in parquet_files]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"Error processing file: {e}")
+
+
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute statistics for a dataset.")
     parser.add_argument(
@@ -502,20 +586,29 @@ if __name__ == "__main__":
         required=True,
         help="Path to the dataset directory containing data, videos, and meta subfolders.",
     )
+    parser.add_argument(
+        "--version",
+        type=str,
+        required=True,
+        help="Version of the dataset.",
+    )
     args = parser.parse_args()
 
     DATASET_PATH = args.dataset_path
-
-    stats = tensor_to_list(compute_stats(DATASET_PATH))
-
+    VERSION = args.version
     META_PATH = os.path.join(DATASET_PATH, "meta")
 
-    STATS_FILE = os.path.join(META_PATH, "stats.json")
-    # Overwrite the stats.json file
-    with open(STATS_FILE, "w") as f:
-        json.dump(stats, f, indent=4)
+    if VERSION == "v2.0":
+        stats = tensor_to_list(compute_stats(DATASET_PATH))
+        STATS_FILE = os.path.join(META_PATH, "stats.json")
+        # Overwrite the stats.json file
+        with open(STATS_FILE, "w") as f:
+            json.dump(stats, f, indent=4)
+        logger.success(f"Stats computed and saved to {STATS_FILE}")
+    elif VERSION == "v2.1":
+        update_stats_parallel(DATASET_PATH)
+        logger.success(f"Updated episodes_stats.jsonl")
 
-    logger.success(f"Stats computed and saved to {STATS_FILE}")
 
     # Edit the info.json file
     dataset = ParquetEpisodesDataset(DATASET_PATH)
