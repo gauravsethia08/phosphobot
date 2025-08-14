@@ -511,6 +511,14 @@ def decode_video_frames_torchvision(
 
 
 def process_parquet_file(file_path, episodes_stats_file):
+    """
+    Process a single parquet file and update the episodes_stats.jsonl file
+    Args:
+        file_path: path to the parquet file
+        episodes_stats_file: path to the episodes_stats.jsonl file
+    Returns:
+        file_path: path to the parquet file
+    """
     df = pd.read_parquet(file_path, engine="pyarrow")
     stats = {}
 
@@ -552,6 +560,14 @@ def process_parquet_file(file_path, episodes_stats_file):
     return file_path
 
 def update_stats_parallel(dataset_path, max_workers=8):
+    """
+    Update the episodes_stats.jsonl file in parallel
+    Args:
+        dataset_path: path to the dataset directory
+        max_workers: number of workers to use
+    Returns:
+        None
+    """
     episodes_stats_file = os.path.join(dataset_path, "meta", "episodes_stats.jsonl")
     # delete the episodes_stats.jsonl file if it exists
     if os.path.exists(episodes_stats_file):
@@ -607,6 +623,16 @@ if __name__ == "__main__":
         logger.success(f"Stats computed and saved to {STATS_FILE}")
     elif VERSION == "v2.1":
         update_stats_parallel(DATASET_PATH)
+        # read the episodes_stats.jsonl file
+        with open(os.path.join(META_PATH, "episodes_stats.jsonl"), "r") as f:
+            episodes_stats = [json.loads(line) for line in f]
+        # sort the episodes_stats by episode_index
+        episodes_stats.sort(key=lambda x: x["episode_index"])
+        # write the episodes_stats to a new file
+        with open(os.path.join(META_PATH, "episodes_stats.jsonl"), "w") as f:
+            for episode_stats in episodes_stats:
+                json.dump(episode_stats, f)
+                f.write("\n")
         logger.success(f"Updated episodes_stats.jsonl")
 
 

@@ -214,6 +214,13 @@ def run_stats_script(dataset_path):
 
 
 def delete_indexes(indexes: list[int]):
+    """
+    Delete the specified indexes from the dataset
+    Args:
+        indexes: list of indexes to delete
+    Returns:
+        None
+    """
     # Delete the parquet files
     logger.info("Deleting parquet files...")
     for parquets_folder_path in parquets_folder_paths:
