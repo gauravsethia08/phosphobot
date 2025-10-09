@@ -159,9 +159,9 @@ def process_parquet_files(folder_path, videos_folder_path=None):
 
                 # Delete 1st row; temporarily fixes an issue with some datasets
                 #if len(df) > 1:
-                logger.info(f"DF Len before - {len(df)}")
-                df = df.iloc[1:].reset_index(drop=True)
-                logger.info(f"DF Len after - {len(df)}")
+                # logger.info(f"DF Len before - {len(df)}")
+                # df = df.iloc[1:].reset_index(drop=True)
+                # logger.info(f"DF Len after - {len(df)}")
 
                 # Add episode_index column with the extracted number
                 df["episode_index"] = episode_number
