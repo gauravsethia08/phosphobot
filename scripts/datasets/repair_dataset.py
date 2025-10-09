@@ -157,6 +157,12 @@ def process_parquet_files(folder_path, videos_folder_path=None):
                 # Read the parquet file
                 df = pd.read_parquet(file_path, engine="pyarrow")
 
+                # Delete 1st row; temporarily fixes an issue with some datasets
+                #if len(df) > 1:
+                logger.info(f"DF Len before - {len(df)}")
+                df = df.iloc[1:].reset_index(drop=True)
+                logger.info(f"DF Len after - {len(df)}")
+
                 # Add episode_index column with the extracted number
                 df["episode_index"] = episode_number
 
@@ -181,7 +187,8 @@ def process_parquet_files(folder_path, videos_folder_path=None):
                         *np.deg2rad(action_array[:6]),  # Convert first 6 elements to radians
                         action_array[6]/10000,          # Scale element 6
                         *np.deg2rad(action_array[7:13]), # Convert elements 7-12 to radians
-                        action_array[13]/10000          # Scale element 13
+                        action_array[13]/10000,
+                        *action_array[14:],         # Scale element 13
                     ]))
 
                 # Save the modified DataFrame back to the same file
