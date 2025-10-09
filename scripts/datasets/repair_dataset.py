@@ -163,6 +163,12 @@ def process_parquet_files(folder_path, videos_folder_path=None):
                 # Rewrite frame_index column to go from 0 to n-1
                 df["frame_index"] = range(len(df))
 
+                # 0 padd for 100 observation.state
+                if df["observation.state"].iloc[0].shape[0] < 100:
+                    df["observation.state"] = df["observation.state"].apply(
+                        lambda state: np.pad(state, (0, 100 - len(state)), 'constant')
+                    )
+
                 # Rewrite index column to be a rolling index
                 df["index"] = range(total_index, total_index + len(df))
                 total_index += len(df)

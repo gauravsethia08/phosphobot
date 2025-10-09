@@ -33,6 +33,8 @@ class ParquetEpisodesDataset(Dataset):
             logger.warning(f"Videos directory not found: {self.videos_dir}")
             self.videos = None
             # raise FileNotFoundError(f"Videos directory not found: {self.videos_dir}")
+        else:
+            self.videos = True
 
         self.file_paths = sorted(self.data_dir.rglob("*.parquet"))
         if self.videos_dir is not None:
