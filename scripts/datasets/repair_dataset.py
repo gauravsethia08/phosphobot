@@ -170,10 +170,41 @@ def process_parquet_files(folder_path, videos_folder_path=None):
                 df["frame_index"] = range(len(df))
 
                 # 0 padd for 100 observation.state
-                if df["observation.state"].iloc[0].shape[0] < 100:
-                    df["observation.state"] = df["observation.state"].apply(
-                        lambda state: np.pad(state, (0, 100 - len(state)), 'constant')
-                    )
+                # if df["observation.state"].iloc[0].shape[0] < 100:
+                #     df["observation.state"] = df["observation.state"].apply(
+                #         lambda state: np.pad(state, (0, 100 - len(state)), 'constant')
+                #     )
+                if df["observation.state"].iloc[0].shape[0] == 100:
+                    # Take only joint positions 
+                    mapping = {
+                        'left_joint_pos': list(range(7)),
+                        'left_joint_vel': list(range(7, 14)),
+                        'left_joint_acc': list(range(14, 21)),
+                        'left_joint_torque': list(range(21, 28)),
+                        'left_ee_pos': list(range(28, 31)),
+                        'left_ee_cols': list(range(31, 37)),
+                        'left_ee_lin_vel': list(range(37, 40)),
+                        'left_ee_ang_vel': list(range(40, 43)),
+                        'right_joint_pos': list(range(43, 50)),
+                        'right_joint_vel': list(range(50, 57)),
+                        'right_joint_acc': list(range(57, 64)),
+                        'right_joint_torque': list(range(64, 71)),
+                        'right_ee_pos': list(range(71, 74)),
+                        'right_ee_cols': list(range(74, 80)),
+                        'right_ee_lin_vel': list(range(80, 83)),
+                        'right_ee_ang_vel': list(range(83, 86)),
+                        'left_past_action': list(range(86, 93)),
+                        'right_past_action': list(range(93, 100)),
+                    }
+
+                    left_idx = mapping['left_joint_pos']
+                    right_idx = mapping['right_joint_pos']
+
+                    def _select_left_right_joints(state):
+                        arr = np.asarray(state)
+                        return np.concatenate((arr[left_idx], arr[right_idx]))
+
+                    df["observation.state"] = df["observation.state"].apply(_select_left_right_joints)
 
                 # Rewrite index column to be a rolling index
                 df["index"] = range(total_index, total_index + len(df))
