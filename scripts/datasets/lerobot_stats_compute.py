@@ -16,6 +16,106 @@ import argparse
 import cv2
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+import boto3
+import io
+s3 = boto3.client("s3")
+BUCKET = "deft-robotics"
+MOUNT_PATH = "/opt/dlami/nvme/projects/deft-robotics"
+
+def _key(path):
+    """Convert local path to S3 key"""
+    return path.split("deft-robotics/", 1)[-1]
+
+def s3_delete(path):
+    key = _key(path)
+    print(f"Deleting s3://{BUCKET}/{key}")
+    s3.delete_object(Bucket=BUCKET, Key=key)
+
+
+import os
+import io
+import json
+import boto3
+from botocore.exceptions import ClientError
+
+def append_json_line_s3(episodes_stats, file_path, bucket="deft-robotics", mount_path="/mnt/s3"):
+    """
+    Append multiple JSON lines to a file on S3 or local filesystem.
+
+    Args:
+        episodes_stats (list of dict): List of JSON-serializable dicts.
+        file_path (str): Path to the file (mounted or local).
+        bucket (str): S3 bucket name.
+        mount_path (str): Local mount path of S3 bucket.
+    """
+    abs_path = os.path.abspath(file_path)
+
+    if abs_path.startswith(mount_path):
+        s3 = boto3.client("s3")
+        key = abs_path.replace(mount_path + "/", "", 1)
+
+        # Download existing content
+        buffer = io.BytesIO()
+        try:
+            s3.download_fileobj(bucket, key, buffer)
+            buffer.seek(0)
+            existing_content = buffer.read().decode("utf-8")
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "404":
+                existing_content = ""
+            else:
+                raise
+
+        # Append new lines
+        # print("Episodes stats to append:", episodes_stats)
+        # new_content = "\n".join(json.dumps(es) for es in episodes_stats) + "\n"
+        new_content = json.dumps(episodes_stats) + "\n"  # remove [ ] from list
+        combined_content = existing_content + new_content
+
+        upload_buffer = io.BytesIO(combined_content.encode("utf-8"))
+        upload_buffer.seek(0)
+        s3.upload_fileobj(upload_buffer, bucket, key)
+        print(f"✅ Appended {len(episodes_stats)} JSON lines to s3://{bucket}/{key}")
+
+    else:
+        # Local fallback
+        with open(file_path, "a") as f:
+            for episode_stats in episodes_stats:
+                f.write(json.dumps(episode_stats) + "\n")
+        print(f"✅ Appended {len(episodes_stats)} JSON lines to local file {file_path}")
+
+def write_json_s3(data, file_path, bucket=BUCKET, mount_path=MOUNT_PATH, indent=4):
+    """
+    Write a complete JSON object to a file on S3 or local filesystem.
+    
+    Args:
+        data (dict): JSON-serializable dictionary.
+        file_path (str): Path to the file (mounted or local).
+        bucket (str): S3 bucket name.
+        mount_path (str): Local mount path of S3 bucket.
+        indent (int): JSON indentation for pretty printing.
+    """
+    abs_path = os.path.abspath(file_path)
+    
+    if abs_path.startswith(mount_path):
+        # S3 path
+        s3 = boto3.client("s3")
+        key = abs_path.replace(mount_path + "/", "", 1)
+        
+        # Serialize JSON to bytes
+        json_content = json.dumps(data, indent=indent)
+        upload_buffer = io.BytesIO(json_content.encode("utf-8"))
+        upload_buffer.seek(0)
+        
+        # Upload to S3
+        s3.upload_fileobj(upload_buffer, bucket, key)
+        print(f"✅ Wrote JSON to s3://{bucket}/{key}")
+    else:
+        # Local path
+        with open(file_path, "w") as f:
+            json.dump(data, f, indent=indent)
+        print(f"✅ Wrote JSON to local file {file_path}")
+
 class ParquetEpisodesDataset(Dataset):
     """Custom Dataset for loading parquet files from a directory."""
 
@@ -68,6 +168,7 @@ class ParquetEpisodesDataset(Dataset):
             episode_idx = int(file_path.stem.split("_")[-1])
             df = self.read_parquet(str(file_path))
             nb_steps = len(df)
+            del df
             self.episode_nb_steps.append(nb_steps)
 
             # Needed for episodes.jsonl
@@ -112,14 +213,17 @@ class ParquetEpisodesDataset(Dataset):
         else:
             self.video_keys = None
 
+        import gc; gc.collect()
+
     def __len__(self):
         return self.total_length
 
     def read_parquet(self, file_path: str):
         # Cache the parquet files to avoid reading them multiple times
-        if file_path not in self.parquet_cache:
-            self.parquet_cache[file_path] = pd.read_parquet(file_path)
-        return self.parquet_cache[file_path]
+        # if file_path not in self.parquet_cache:
+        #     self.parquet_cache[file_path] = pd.read_parquet(file_path)
+        # return self.parquet_cache[file_path]
+        return pd.read_parquet(file_path)
 
     def __getitem__(self, idx: int):
         if idx >= self.total_length:
@@ -163,32 +267,98 @@ class ParquetEpisodesDataset(Dataset):
 
         return sample
 
-    def write_episodes(self, output_dir: str):
-        # We want to write the episodes format
-        # {"episode_index": 0, "length": 57}
-        # {"episode_index": 1, "length": 88}
-        # ...
+    # def write_episodes(self, output_dir: str):
+    #     # We want to write the episodes format
+    #     # {"episode_index": 0, "length": 57}
+    #     # {"episode_index": 1, "length": 88}
+    #     # ...
 
-        # For now, we resolve ot a temporary fix: use the first task from the meta/tasks.json file
-        # But we would like to be able to handle multiple tasks
-        # See the training/phospho_lerobot/scripts/multidataset.py save_episodes_jsonl() method
+    #     # For now, we resolve ot a temporary fix: use the first task from the meta/tasks.json file
+    #     # But we would like to be able to handle multiple tasks
+    #     # See the training/phospho_lerobot/scripts/multidataset.py save_episodes_jsonl() method
+    #     task = None
+    #     with open(os.path.join(self.dataset_dir, "meta", "tasks.jsonl"), "r") as file:
+    #         for line in file:
+    #             if line.strip():  # Skip empty lines
+    #                 row = json.loads(line)
+    #                 task = row["task"]
+    #     if task is None:
+    #         raise ValueError("No task found in the meta/tasks.json file")
+
+    #     for episode_idx, nb_steps in self.steps_per_episode.items():
+    #         episode = {
+    #             "episode_index": episode_idx,
+    #             "tasks": task,
+    #             "length": nb_steps,
+    #         }
+    #         with open(output_dir, "a") as f:
+    #             f.write(json.dumps(episode) + "\n")
+    import os
+    import io
+    import json
+    import boto3
+    from botocore.exceptions import ClientError
+
+    def write_episodes(self, output_dir: str, bucket="deft-robotics", mount_path="/opt/dlami/nvme/projects/deft-robotics"):
+        """
+        Write episode metadata either to local filesystem or to S3 if output_dir
+        is under a mounted S3 directory.
+        """
+        s3 = boto3.client("s3")
+
+        # --- Load task info ---
         task = None
-        with open(os.path.join(self.dataset_dir, "meta", "tasks.jsonl"), "r") as file:
+        meta_path = os.path.join(self.dataset_dir, "meta", "tasks.jsonl")
+        with open(meta_path, "r") as file:
             for line in file:
-                if line.strip():  # Skip empty lines
+                if line.strip():
                     row = json.loads(line)
                     task = row["task"]
         if task is None:
             raise ValueError("No task found in the meta/tasks.json file")
 
+        # --- Serialize all episodes ---
+        episodes = []
         for episode_idx, nb_steps in self.steps_per_episode.items():
-            episode = {
+            episodes.append({
                 "episode_index": episode_idx,
                 "tasks": task,
                 "length": nb_steps,
-            }
+            })
+        new_content = "\n".join(json.dumps(ep) for ep in episodes) + "\n"
+
+        abs_path = os.path.abspath(output_dir)
+        if abs_path.startswith(mount_path):
+            # --- Handle S3 destination ---
+            key = abs_path.replace(mount_path + "/", "", 1)
+
+            # Try to download existing content (for append)
+            buffer = io.BytesIO()
+            try:
+                s3.download_fileobj(bucket, key, buffer)
+                buffer.seek(0)
+                existing_content = buffer.read().decode("utf-8")
+            except ClientError as e:
+                # If file doesn't exist, start fresh
+                if e.response["Error"]["Code"] == "404":
+                    existing_content = ""
+                else:
+                    raise
+
+            # Combine old + new lines
+            combined = existing_content + new_content
+            upload_buffer = io.BytesIO(combined.encode("utf-8"))
+            upload_buffer.seek(0)
+
+            s3.upload_fileobj(upload_buffer, bucket, key)
+            print(f"✅ Updated episodes file at s3://{bucket}/{key}")
+
+        else:
+            # --- Handle local path normally ---
             with open(output_dir, "a") as f:
-                f.write(json.dumps(episode) + "\n")
+                f.write(new_content)
+            print(f"✅ Updated local episodes file at {output_dir}")
+
 
 
 def get_stats_einops_patterns(
@@ -290,7 +460,7 @@ def compute_stats(dataset_path, batch_size=128, num_workers=2, max_num_samples=N
         max_num_samples = len(dataset)
 
     # for more info on why we need to set the same number of workers, see `load_from_videos`
-    dataset = ParquetEpisodesDataset(dataset_path)
+    # dataset = ParquetEpisodesDataset(dataset_path)
 
     # Example DataLoader that returns dictionaries of tensors
     generator = torch.Generator()
@@ -522,6 +692,8 @@ def process_parquet_file(file_path, episodes_stats_file):
         file_path: path to the parquet file
     """
     df = pd.read_parquet(file_path, engine="pyarrow")
+    # print(f"Processing {file_path} with {len(df)} rows")
+    # print(f"Columns: {df.columns.tolist()}")
     stats = {}
 
     for feature in df.columns:
@@ -553,15 +725,17 @@ def process_parquet_file(file_path, episodes_stats_file):
             stats[feature]["min"] = all_images.min(axis=(0, 1, 2)).reshape(-1, 1, 1).tolist()
 
     # Append to the stats file (thread-safe if using file locking)
-    with open(episodes_stats_file, "a") as f:
-        episode_stats = {"episode_index": int(df["episode_index"].iloc[0]), "stats": stats}
-        json.dump(episode_stats, f)
-        f.write("\n")
+    # with open(episodes_stats_file, "a") as f:
+    #     episode_stats = {"episode_index": int(df["episode_index"].iloc[0]), "stats": stats}
+    #     json.dump(episode_stats, f)
+    #     f.write("\n")
+    episode_stats = {"episode_index": int(df["episode_index"].iloc[0]), "stats": stats}
+    append_json_line_s3(episode_stats, episodes_stats_file, bucket=BUCKET, mount_path=MOUNT_PATH)
 
     logger.success(f"Processed {file_path}")
     return file_path
 
-def update_stats_parallel(dataset_path, max_workers=8):
+def update_stats_parallel(dataset_path, max_workers=4):
     """
     Update the episodes_stats.jsonl file in parallel
     Args:
@@ -573,7 +747,8 @@ def update_stats_parallel(dataset_path, max_workers=8):
     episodes_stats_file = os.path.join(dataset_path, "meta", "episodes_stats.jsonl")
     # delete the episodes_stats.jsonl file if it exists
     if os.path.exists(episodes_stats_file):
-        os.remove(episodes_stats_file)
+        # os.remove(episodes_stats_file)
+        s3_delete(episodes_stats_file)
     os.makedirs(os.path.dirname(episodes_stats_file), exist_ok=True)
 
     parquet_files = []
@@ -627,16 +802,20 @@ if __name__ == "__main__":
         update_stats_parallel(DATASET_PATH)
         # read the episodes_stats.jsonl file
         with open(os.path.join(META_PATH, "episodes_stats.jsonl"), "r") as f:
-            episodes_stats = [json.loads(line) for line in f]
+            episodes_stats = [json.loads(line) for line in f if line.strip()]
         # sort the episodes_stats by episode_index
-        episodes_stats.sort(key=lambda x: x["episode_index"])
+        episodes_stats = [ep for ep in episodes_stats if "episode_index" in ep]
+        print(f"Total episodes stats computed: {len(episodes_stats)}")
+        print(f"Sample episode stats: {episodes_stats}")
+        print(f"Sample episode stats: {episodes_stats[-1]}")
+        episodes_stats.sort(key=lambda x: int(x["episode_index"]))
         # write the episodes_stats to a new file
-        with open(os.path.join(META_PATH, "episodes_stats.jsonl"), "w") as f:
-            for episode_stats in episodes_stats:
-                json.dump(episode_stats, f)
-                f.write("\n")
-        logger.success(f"Updated episodes_stats.jsonl")
-
+        # with open(os.path.join(META_PATH, "episodes_stats.jsonl"), "w") as f:
+        #     for episode_stats in episodes_stats:
+        #         json.dump(episode_stats, f)
+        #         f.write("\n")
+        append_json_line_s3(episodes_stats, os.path.join(META_PATH, "episodes_stats.jsonl"),
+                            bucket=BUCKET, mount_path=MOUNT_PATH)
 
     # Edit the info.json file
     dataset = ParquetEpisodesDataset(DATASET_PATH)
@@ -655,8 +834,10 @@ if __name__ == "__main__":
     info["total_videos"] = total_videos
     info["splits"] = splits
 
-    with open(INFO_FILE, "w") as f:
-        json.dump(info, f, indent=4)
+    # with open(INFO_FILE, "w") as f:
+    #     # json.dump(info, f, indent=4)
+    #     append_json_line_s3(info, INFO_FILE, bucket=BUCKET, mount_path=MOUNT_PATH)
+    write_json_s3(info, INFO_FILE, bucket=BUCKET, mount_path=MOUNT_PATH)
 
     logger.success(f"Info updated and saved to {INFO_FILE}")
 
@@ -664,7 +845,8 @@ if __name__ == "__main__":
     EPISODES_FILE = os.path.join(META_PATH, "episodes.jsonl")
     # delete the episodes file if it exists
     if os.path.exists(EPISODES_FILE):
-        os.remove(EPISODES_FILE)
+        # os.remove(EPISODES_FILE)
+        s3_delete(EPISODES_FILE)
     dataset.write_episodes(EPISODES_FILE)
 
     logger.success(f"Episodes written to {EPISODES_FILE}")
