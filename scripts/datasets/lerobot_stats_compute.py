@@ -27,10 +27,12 @@ def _key(path):
     return path.split("deft-robotics/", 1)[-1]
 
 def s3_delete(path):
-    key = _key(path)
-    print(f"Deleting s3://{BUCKET}/{key}")
-    s3.delete_object(Bucket=BUCKET, Key=key)
-
+    try:
+        key = _key(path)
+        print(f"Deleting s3://{BUCKET}/{key}")
+        s3.delete_object(Bucket=BUCKET, Key=key)
+    except Exception as e:
+        os.remove(path)
 
 import os
 import io
@@ -49,7 +51,7 @@ def append_json_line_s3(episodes_stats, file_path, bucket="deft-robotics", mount
         mount_path (str): Local mount path of S3 bucket.
     """
     abs_path = os.path.abspath(file_path)
-
+    
     if abs_path.startswith(mount_path):
         s3 = boto3.client("s3")
         key = abs_path.replace(mount_path + "/", "", 1)
@@ -808,7 +810,18 @@ if __name__ == "__main__":
         print(f"Total episodes stats computed: {len(episodes_stats)}")
         print(f"Sample episode stats: {episodes_stats}")
         print(f"Sample episode stats: {episodes_stats[-1]}")
-        episodes_stats.sort(key=lambda x: int(x["episode_index"]))
+        try:
+            # Filter out any non-dict entries and ensure episode_index exists
+            # episodes_stats = [
+            #     ep for ep in episodes_stats 
+            #     if isinstance(ep, dict) and "episode_index" in ep
+            # ]
+            episodes_stats.sort(key=lambda x: int(x["episode_index"]))
+        except Exception as e:
+            print(f"Error sorting episodes_stats: {e}")
+            print(f"episodes_stats: {episodes_stats}")
+            print(f"episodes_stats types: {[type(ep) for ep in episodes_stats[:5]]}")
+            
         # write the episodes_stats to a new file
         # with open(os.path.join(META_PATH, "episodes_stats.jsonl"), "w") as f:
         #     for episode_stats in episodes_stats:

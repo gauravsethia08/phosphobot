@@ -28,38 +28,48 @@ def _key(path):
     return path.split("deft-robotics/", 1)[-1]
 
 def s3_delete(path):
-    key = _key(path)
-    print(f"Deleting s3://{BUCKET}/{key}")
-    s3.delete_object(Bucket=BUCKET, Key=key)
+    try:
+        key = _key(path)
+        print(f"Deleting s3://{BUCKET}/{key}")
+        s3.delete_object(Bucket=BUCKET, Key=key)
+    except Exception as e:
+        os.remove(path)
 
 def s3_rename(src, dst):
-    src_key = _key(src)
-    dst_key = _key(dst)
-    print(f"Renaming s3://{BUCKET}/{src_key} -> s3://{BUCKET}/{dst_key}")
-    s3.copy_object(Bucket=BUCKET, CopySource=f"{BUCKET}/{src_key}", Key=dst_key)
-    s3.delete_object(Bucket=BUCKET, Key=src_key)
+    try:
+        src_key = _key(src)
+        dst_key = _key(dst)
+        print(f"Renaming s3://{BUCKET}/{src_key} -> s3://{BUCKET}/{dst_key}")
+        s3.copy_object(Bucket=BUCKET, CopySource=f"{BUCKET}/{src_key}", Key=dst_key)
+        s3.delete_object(Bucket=BUCKET, Key=src_key)
+    except Exception as e:
+        os.rename(src, dst)
 
 def safe_to_parquet(df, file_path, bucket=BUCKET, mount_path=MOUNT_PATH, **kwargs):
-    abs_path = os.path.abspath(file_path)
-    if not abs_path.startswith(mount_path):
-        raise ValueError(f"File path {abs_path} is not under mount path {mount_path}")
-
-    key = abs_path.replace(mount_path + "/", "", 1)
-
-    buffer = io.BytesIO()
-    df.to_parquet(buffer, index=False, **kwargs)
-    buffer.seek(0)
-
-    s3 = boto3.client("s3")
-
-    # optional explicit delete (not required)
     try:
-        s3.delete_object(Bucket=bucket, Key=key)
-    except Exception:
-        pass  # ignore if not found
+        abs_path = os.path.abspath(file_path)
+        if not abs_path.startswith(mount_path):
+            raise ValueError(f"File path {abs_path} is not under mount path {mount_path}")
 
-    s3.upload_fileobj(buffer, bucket, key)
-    print(f"✅ Overwritten s3://{bucket}/{key}")
+        key = abs_path.replace(mount_path + "/", "", 1)
+
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, index=False, **kwargs)
+        buffer.seek(0)
+
+        s3 = boto3.client("s3")
+
+        # optional explicit delete (not required)
+        try:
+            s3.delete_object(Bucket=bucket, Key=key)
+        except Exception:
+            pass  # ignore if not found
+
+        s3.upload_fileobj(buffer, bucket, key)
+        print(f"✅ Overwritten s3://{bucket}/{key}")
+    except Exception as e:
+        df.to_parquet(file_path, index=False, **kwargs)
+        print(f"✅ Overwritten local file {file_path}")
 
 @dataclass
 class Config:
@@ -221,27 +231,25 @@ def process_parquet_files(folder_path, videos_folder_path=None):
                 #         lambda state: np.pad(state, (0, 100 - len(state)), 'constant')
                 #     )
 
-                if df["observation.state"].iloc[0].shape[0] == 100:
+                if df["observation.state"].iloc[0].shape[0] == 86:
                     # Take only joint positions 
                     mapping = {
                         'left_joint_pos': list(range(7)),
                         'left_joint_vel': list(range(7, 14)),
-                        'left_joint_acc': list(range(14, 21)),
-                        'left_joint_torque': list(range(21, 28)),
-                        'left_ee_pos': list(range(28, 31)),
-                        'left_ee_cols': list(range(31, 37)),
-                        'left_ee_lin_vel': list(range(37, 40)),
-                        'left_ee_ang_vel': list(range(40, 43)),
-                        'right_joint_pos': list(range(43, 50)),
-                        'right_joint_vel': list(range(50, 57)),
-                        'right_joint_acc': list(range(57, 64)),
-                        'right_joint_torque': list(range(64, 71)),
-                        'right_ee_pos': list(range(71, 74)),
-                        'right_ee_cols': list(range(74, 80)),
-                        'right_ee_lin_vel': list(range(80, 83)),
-                        'right_ee_ang_vel': list(range(83, 86)),
-                        'left_past_action': list(range(86, 93)),
-                        'right_past_action': list(range(93, 100)),
+                        'left_joint_torque': list(range(14, 21)),
+                        'left_ee_pos': list(range(21, 24)),
+                        'left_ee_cols': list(range(24, 30)),
+                        'left_ee_lin_vel': list(range(30, 33)),
+                        'left_ee_ang_vel': list(range(33, 36)),
+                        'right_joint_pos': list(range(36, 43)),
+                        'right_joint_vel': list(range(43, 50)),
+                        'right_joint_torque': list(range(50, 57)),
+                        'right_ee_pos': list(range(57, 60)),
+                        'right_ee_cols': list(range(60, 66)),
+                        'right_ee_lin_vel': list(range(66, 69)),
+                        'right_ee_ang_vel': list(range(69, 72)),
+                        'left_past_action': list(range(72, 79)),
+                        'right_past_action': list(range(79, 86)),
                     }
 
                     left_idx = mapping['left_joint_pos']
@@ -269,6 +277,7 @@ def process_parquet_files(folder_path, videos_folder_path=None):
                         *action_array[14:],         # Scale element 13
                     ]))
 
+                # df.drop(columns=["observation.images.cam_high_depth", "observation.images.cam_low_depth"], errors='ignore', inplace=True)
                 # Save the modified DataFrame back to the same file
                 # df.to_parquet(file_path, index=False)
                 safe_to_parquet(df, file_path)
@@ -394,15 +403,15 @@ if __name__ == "__main__":
     run_stats_script(dataset_path)
 
     # Push dataset to HF
-    print("Pushing dataset to HF...")
-    dataset_name = os.path.basename(dataset_path)
-    subprocess.run(
-        [
-            "python",
-            "push_dataset_to_hf.py",
-            dataset_path,
-            dataset_name,
-        ],
-        check=True,
-    )
-    print("Dataset pushed successfully")
+    # print("Pushing dataset to HF...")
+    # dataset_name = os.path.basename(dataset_path)
+    # subprocess.run(
+    #     [
+    #         "python",
+    #         "push_dataset_to_hf.py",
+    #         dataset_path,
+    #         dataset_name,
+    #     ],
+    #     check=True,
+    # )
+    # print("Dataset pushed successfully")
